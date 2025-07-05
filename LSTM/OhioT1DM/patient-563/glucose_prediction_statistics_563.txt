@@ -1,0 +1,12 @@
+--- Model Performance Statistics ---
+
+Training RMSE: 4.4765
+Training MAE: 2.5152
+Training R-squared: 0.9919
+Test RMSE: 5.4286
+Test MAE: 2.9619
+Test R-squared: 0.9861
+
+--- Associated Plots ---
+Training Loss Plot: /Users/naveenkamath/Documents/GitHub/sequence-model-comparison-cgm/sequence-model-comparison-cgm/LSTM/OhioT1DM/patient-563/glucose_training_loss_563.png
+Test Predictions Plot: /Users/naveenkamath/Documents/GitHub/sequence-model-comparison-cgm/sequence-model-comparison-cgm/LSTM/OhioT1DM/patient-563/glucose_test_predictions_563.png
