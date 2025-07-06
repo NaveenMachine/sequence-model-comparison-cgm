@@ -3,159 +3,138 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential, load_model, Model
-from tensorflow.keras.layers import Dense, Input, MultiHeadAttention, LayerNormalization, Dropout, Flatten
-import tensorflow as tf # Import tensorflow to save/load models
+from tensorflow.keras.layers import Dense, Input, LayerNormalization, Dropout, Conv1D, GlobalAveragePooling1D
+import tensorflow as tf
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 import os
 
-# --- Custom Keras Layers for Transformer ---
+# --- Custom Keras Layers for Mamba (Simplified Approximation) ---
 
-class PositionalEncoding(tf.keras.layers.Layer):
+class MambaBlock(tf.keras.layers.Layer):
     """
-    Custom Keras Layer for Positional Encoding.
-    Adds sinusoidal positional encodings to the input embeddings.
-    This is crucial for Transformer models to understand the order of elements
-    in a sequence, as self-attention mechanisms are permutation-invariant.
+    A simplified Keras implementation of a Mamba-like block.
+    This approximation focuses on capturing the local context via Conv1D
+    and a gating mechanism, rather than the full, complex selective scan.
+    It aims to provide a Mamba-inspired alternative to Transformer blocks
+    for sequence modeling in Keras.
+
+    Based on the conceptual components of Mamba:
+    1. Linear projection (input expansion)
+    2. Convolutional layer (local context)
+    3. Selective linear projection (simplified delta, A, B, C parameters)
+    4. Gating mechanism (SiLU and element-wise multiplication)
+    5. Residual connection and Layer Normalization
     """
-    def __init__(self, position, d_model, **kwargs):
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, dropout_rate=0.1, **kwargs):
         """
-        Initializes the PositionalEncoding layer.
+        Initializes the MambaBlock.
 
         Args:
-            position (int): The maximum sequence length this encoding can handle.
-            d_model (int): The dimension of the model's embeddings (embedding_dim).
+            d_model (int): The dimension of the input and output embeddings.
+            d_state (int): The dimension of the state in the SSM. (Simplified, mostly for conceptual alignment)
+            d_conv (int): The kernel size for the 1D convolution.
+            expand (int): Expansion factor for the hidden dimension.
+            dropout_rate (float): Dropout rate.
         """
-        super(PositionalEncoding, self).__init__(**kwargs)
-        self.position = position
+        super(MambaBlock, self).__init__(**kwargs)
         self.d_model = d_model
-        # Pre-calculate the positional encodings
-        self.pos_encoding = self.positional_encoding(position, d_model)
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        self.dropout_rate = dropout_rate
 
-    def get_angles(self, position, i, d_model):
-        """
-        Calculates the angles for the sinusoidal positional encoding.
-        """
-        angles = 1 / np.power(10000, (2 * (i // 2)) / np.float32(d_model))
-        return position * angles
+        self.d_inner = int(self.expand * self.d_model)
 
-    def positional_encoding(self, position, d_model):
-        """
-        Generates the sinusoidal positional encoding matrix.
-        """
-        angle_rads = self.get_angles(
-            np.arange(position)[:, np.newaxis], # Positions (rows)
-            np.arange(d_model)[np.newaxis, :],  # Dimensions (columns)
-            d_model
+        # 1. Input projection and expansion
+        # Projects input to 2 * d_inner for the GLU-like gating
+        self.in_proj = Dense(2 * self.d_inner, use_bias=False, name="input_projection")
+
+        # 2. Convolutional layer (depthwise for local context)
+        # Kernel size d_conv, ensures local information capture
+        self.conv1d = Conv1D(
+            filters=self.d_inner,
+            kernel_size=self.d_conv,
+            groups=self.d_inner, # Depthwise convolution
+            padding='causal', # Causal padding to prevent looking into the future
+            activation="silu",
+            use_bias=False,
+            name="conv1d"
         )
 
-        # Apply sin to even indices (0, 2, 4...) in the embedding dimension
-        angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+        # 3. Selective linear projection (simplified)
+        # These layers are a simplified representation of generating SSM parameters (delta, A, B, C)
+        # For a full Mamba, these would interact with the state. Here, they contribute to the gate.
+        self.x_proj = Dense(self.d_state + self.d_state + self.d_inner, use_bias=False, name="x_projection") # delta, B, C (simplified)
 
-        # Apply cos to odd indices (1, 3, 5...) in the embedding dimension
-        angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+        # Output projection
+        self.out_proj = Dense(self.d_model, use_bias=False, name="output_projection")
 
-        # Add an extra dimension for batch size (becomes (1, position, d_model))
-        pos_encoding = angle_rads[np.newaxis, ...]
-        return tf.cast(pos_encoding, dtype=tf.float32)
+        # Normalization and Dropout
+        self.norm = LayerNormalization(epsilon=1e-6, name="norm")
+        self.dropout = Dropout(self.dropout_rate, name="dropout")
 
-    def call(self, inputs):
-        """
-        Applies positional encoding to the input tensor.
-        Inputs shape: (batch_size, sequence_length, features/d_model)
-        """
-        # Ensure the sequence length of inputs matches the positional encoding length
-        seq_len = tf.shape(inputs)[1]
-        # Add the pre-calculated positional encoding to the input
-        # Slices pos_encoding to match the current sequence length if it's shorter
-        return inputs + self.pos_encoding[:, :seq_len, :]
 
-    def get_config(self):
-        """
-        Returns the serializable configuration of the layer.
-        Required for saving and loading models with custom layers.
-        """
-        config = super(PositionalEncoding, self).get_config()
-        config.update({
-            'position': self.position,
-            'd_model': self.d_model,
-        })
-        return config
-
-class TransformerBlock(tf.keras.layers.Layer):
-    """
-    Custom Keras Layer for a Transformer Block.
-    Consists of Multi-Head Self-Attention, Add & Normalize, and a Feed-Forward Network.
-    """
-    def __init__(self, embed_dim, num_heads, ff_dim, rate=0.1, **kwargs):
-        """
-        Initializes the TransformerBlock.
-
-        Args:
-            embed_dim (int): The dimension of the input embeddings.
-            num_heads (int): The number of attention heads in MultiHeadAttention.
-            ff_dim (int): The hidden layer size of the feed-forward network.
-            rate (float): Dropout rate.
-        """
-        super(TransformerBlock, self).__init__(**kwargs)
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.ff_dim = ff_dim
-        self.rate = rate
-
-        # Multi-Head Attention layer
-        self.att = MultiHeadAttention(num_heads=num_heads, key_dim=embed_dim)
-        # Feed-Forward Network
-        self.ffn = Sequential(
-            [Dense(ff_dim, activation="relu"), Dense(embed_dim),]
-        )
-        # Layer Normalization layers (pre-attention and pre-FFN)
-        self.layernorm1 = LayerNormalization(epsilon=1e-6)
-        self.layernorm2 = LayerNormalization(epsilon=1e-6)
-        # Dropout layers
-        self.dropout1 = Dropout(rate)
-        self.dropout2 = Dropout(rate)
-
-    # FIX: Changed `training` to have a default value of None
-    # and explicitly pass it to layers that require it.
     def call(self, inputs, training=None):
         """
-        Performs the forward pass of the Transformer Block.
+        Performs the forward pass of the Mamba-like Block.
 
         Args:
-            inputs (tf.Tensor): The input tensor to the block.
+            inputs (tf.Tensor): The input tensor to the block (batch_size, sequence_length, d_model).
             training (bool, optional): Whether the model is in training mode (affects dropout).
                                        Defaults to None, Keras handles this during fit/predict.
         """
-        # Multi-Head Self-Attention
-        # Query, Key, Value are all the same for self-attention
-        # FIX: Pass `training` argument to MultiHeadAttention
-        attn_output = self.att(inputs, inputs, training=training)
-        # Apply dropout to attention output
-        attn_output = self.dropout1(attn_output, training=training)
-        # Add and Layer Normalize: inputs + attention_output
-        out1 = self.layernorm1(inputs + attn_output)
+        # Residual connection
+        residual = inputs
 
-        # Feed-Forward Network
-        ffn_output = self.ffn(out1)
-        # Apply dropout to FFN output
-        ffn_output = self.dropout2(ffn_output, training=training)
-        # Add and Layer Normalize: out1 + ffn_output
-        return self.layernorm2(out1 + ffn_output)
+        # Normalize input
+        x = self.norm(inputs)
+
+        # Input projection and split for GLU-like gating
+        # x_in_proj will be split into two parts for gating
+        x_in_proj = self.in_proj(x)
+        x_gate, x_conv_input = tf.split(x_in_proj, num_or_size_splits=2, axis=-1)
+
+        # Convolutional part for local context
+        x_conv = self.conv1d(x_conv_input)
+        x_conv = tf.nn.silu(x_conv) # SiLU activation after convolution
+
+        # Simplified selective projection (mimicking delta, B, C generation)
+        # In a true Mamba, this would involve more complex state manipulation
+        # Here, it contributes to the gating mechanism
+        x_s_proj = self.x_proj(x_conv)
+        # We'll just use the last part for a simplified gate
+        # For a full Mamba, delta would be used to update A, B, C
+        # Here, we just take a part of the projection for the gate
+        _, _, x_selective_gate = tf.split(x_s_proj, num_or_size_splits=[self.d_state, self.d_state, self.d_inner], axis=-1)
+
+
+        # Gating mechanism (GLU-like)
+        # Element-wise multiplication of the input gate with the selective gate
+        gated_output = x_gate * tf.nn.silu(x_selective_gate)
+
+        # Output projection
+        output = self.out_proj(gated_output)
+
+        # Add residual connection and apply dropout
+        output = self.dropout(output, training=training)
+        return residual + output
 
     def get_config(self):
         """
         Returns the serializable configuration of the layer.
         Required for saving and loading models with custom layers.
         """
-        config = super(TransformerBlock, self).get_config()
+        config = super(MambaBlock, self).get_config()
         config.update({
-            'embed_dim': self.embed_dim,
-            'num_heads': self.num_heads,
-            'ff_dim': self.ff_dim,
-            'rate': self.rate,
+            'd_model': self.d_model,
+            'd_state': self.d_state,
+            'd_conv': self.d_conv,
+            'expand': self.expand,
+            'dropout_rate': self.dropout_rate,
         })
         return config
+
 
 # --- Data Processing Functions (Unchanged from original script) ---
 
@@ -253,15 +232,15 @@ def save_statistics_to_file(metrics_dict, file_path, plot_paths=None):
     except Exception as e:
         print(f"Error saving statistics to file {file_path}: {e}")
 
-# --- Main Script Logic (Modified for Transformer) ---
+# --- Main Script Logic (Modified for Mamba) ---
 
-def train_glucose_transformer(train_xml_file_path, test_xml_file_path, look_back=10, epochs=50, batch_size=32,
-                              model_save_path='glucose_transformer_model.h5',
-                              stats_save_path='glucose_prediction_statistics_transformer.txt',
-                              loss_plot_path='training_loss_transformer.png',
-                              prediction_plot_path='test_predictions_transformer.png'):
+def train_glucose_mamba(train_xml_file_path, test_xml_file_path, look_back=10, epochs=50, batch_size=32,
+                        model_save_path='glucose_mamba_model.h5',
+                        stats_save_path='glucose_prediction_statistics_mamba.txt',
+                        loss_plot_path='training_loss_mamba.png',
+                        prediction_plot_path='test_predictions_mamba.png'):
     """
-    Trains a Transformer model for glucose level prediction and evaluates it on a separate test set.
+    Trains a Mamba-like model for glucose level prediction and evaluates it on a separate test set.
     The trained model and scaler are saved, and performance statistics and plot paths are saved to a file.
 
     Args:
@@ -294,35 +273,36 @@ def train_glucose_transformer(train_xml_file_path, test_xml_file_path, look_back
 
     # Create sequences for training
     X_train, y_train = create_sequences(scaled_glucose_values_train, look_back)
-    # Reshape for Transformer: (samples, timesteps, features)
-    # Here, features is 1 (glucose value), but will be projected to embed_dim
+    # Reshape for Mamba: (samples, timesteps, features)
+    # Here, features is 1 (glucose value), which will be the d_model for the Mamba block
     X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
 
     print(f"Training data input shape: {X_train.shape}, target shape: {y_train.shape}")
 
-    # Build the Transformer model
-    print("\n--- Building Transformer Model ---")
-    embed_dim = 64  # Embedding size for each time step (feature dimension after projection)
-    num_heads = 2   # Number of attention heads in MultiHeadAttention
-    ff_dim = 64     # Hidden layer size in the feed-forward network of the Transformer block
-    dropout_rate = 0.1 # Dropout rate for Transformer layers
+    # Build the Mamba-like model
+    print("\n--- Building Mamba-like Model ---")
+    d_model = 1  # Input feature dimension (glucose value)
+    d_state = 16 # Dimension of the state in the SSM (conceptual)
+    d_conv = 4   # Kernel size for the 1D convolution
+    expand_factor = 2 # Expansion factor for the hidden dimension
+    dropout_rate = 0.1 # Dropout rate for Mamba layers
 
-    inputs = Input(shape=(look_back, 1))
-    # Project the 1-dimensional glucose feature to embed_dim
-    # This acts as the initial embedding layer for each time step
-    x = Dense(embed_dim, activation="relu")(inputs)
+    inputs = Input(shape=(look_back, d_model)) # Input shape is (timesteps, features)
 
-    # Add positional encoding to inject temporal information
-    x = PositionalEncoding(position=look_back, d_model=embed_dim)(x)
+    # Add one or more Mamba Blocks
+    # Can add multiple blocks by repeating this line: x = MambaBlock(...)(x)
+    mamba_block = MambaBlock(
+        d_model=d_model,
+        d_state=d_state,
+        d_conv=d_conv,
+        expand=expand_factor,
+        dropout_rate=dropout_rate
+    )
+    x = mamba_block(inputs) # The `training` argument is handled implicitly by Keras during fit/predict
 
-    # Add one or more Transformer Blocks
-    # Can add multiple blocks by repeating this line: x = TransformerBlock(...)(x)
-    transformer_block = TransformerBlock(embed_dim, num_heads, ff_dim, rate=dropout_rate)
-    x = transformer_block(x) # The `training` argument is handled implicitly by Keras during fit/predict
-
-    # Flatten the output of the Transformer block before the final Dense layer
-    # This converts the (batch_size, look_back, embed_dim) output to (batch_size, look_back * embed_dim)
-    x = Flatten()(x)
+    # Global Average Pooling to reduce sequence dimension before the final Dense layer
+    # This converts (batch_size, look_back, d_model) to (batch_size, d_model)
+    x = GlobalAveragePooling1D()(x)
 
     # Output layer for regression (predicting a single glucose value)
     outputs = Dense(1)(x)
@@ -420,7 +400,7 @@ def train_glucose_transformer(train_xml_file_path, test_xml_file_path, look_back
     plt.figure(figsize=(15, 7))
     plt.plot(y_test_inv, label='Actual Glucose Level (Test Set)')
     plt.plot(test_predict_inv, label='Predicted Glucose Level (Test Set)')
-    plt.title('Glucose Level Prediction (Test Set) - Transformer Model')
+    plt.title('Glucose Level Prediction (Test Set) - Mamba-like Model')
     plt.xlabel('Time Step')
     plt.ylabel('Glucose Level')
     plt.legend()
@@ -448,24 +428,24 @@ if __name__ == "__main__":
     training_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-training.xml')
     testing_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-testing.xml')
 
-    output_folder_name = f'patient-{patientNum}-transformer' # Changed folder name
+    output_folder_name = f'patient-{patientNum}-mamba' # Changed folder name
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_folder_path = os.path.join(script_dir, output_folder_name)
 
     os.makedirs(output_folder_path, exist_ok=True)
     print(f"Ensured output folder exists at: {output_folder_path}")
 
-    model_save_filename = f'glucose_transformer_model_{patientNum}.h5' # Changed filename
-    stats_save_filename = f'glucose_prediction_statistics_{patientNum}_transformer.txt' # Changed filename
-    loss_plot_filename = f'glucose_training_loss_{patientNum}_transformer.png' # Changed filename
-    prediction_plot_filename = f'glucose_test_predictions_{patientNum}_transformer.png' # Changed filename
+    model_save_filename = f'glucose_mamba_model_{patientNum}.h5' # Changed filename
+    stats_save_filename = f'glucose_prediction_statistics_{patientNum}_mamba.txt' # Changed filename
+    loss_plot_filename = f'glucose_training_loss_{patientNum}_mamba.png' # Changed filename
+    prediction_plot_filename = f'glucose_test_predictions_{patientNum}_mamba.png' # Changed filename
 
     model_save_path = os.path.join(output_folder_path, model_save_filename)
     stats_save_path = os.path.join(output_folder_path, stats_save_filename)
     loss_plot_path = os.path.join(output_folder_path, loss_plot_filename)
     prediction_plot_path = os.path.join(output_folder_path, prediction_plot_filename)
 
-    trained_model, data_scaler = train_glucose_transformer(
+    trained_model, data_scaler = train_glucose_mamba(
         train_xml_file_path=training_xml_path,
         test_xml_file_path=testing_xml_path,
         look_back=LOOK_BACK,
@@ -482,8 +462,7 @@ if __name__ == "__main__":
         try:
             # When loading models with custom layers, provide them in custom_objects
             loaded_model = load_model(model_save_path, custom_objects={
-                'PositionalEncoding': PositionalEncoding,
-                'TransformerBlock': TransformerBlock
+                'MambaBlock': MambaBlock
             })
             print(f"Model loaded successfully from {model_save_path}")
 
@@ -495,7 +474,7 @@ if __name__ == "__main__":
 
                 predicted_scaled_value = loaded_model.predict(scaled_last_sequence)
                 predicted_glucose_value = data_scaler.inverse_transform(predicted_scaled_value)
-                print(f"\nPredicted next glucose level using loaded Transformer model (based on last {LOOK_BACK} test values): {predicted_glucose_value[0][0]:.2f}")
+                print(f"\nPredicted next glucose level using loaded Mamba-like model (based on last {LOOK_BACK} test values): {predicted_glucose_value[0][0]:.2f}")
             else:
                 print(f"Not enough data points ({len(df_test_for_prediction)}) in the test DataFrame to make a prediction using the defined look_back ({LOOK_BACK}).")
 
