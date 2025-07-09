@@ -281,7 +281,7 @@ if __name__ == "__main__":
     BATCH_SIZE = 32
 
     # --- Prediction Horizon Configuration ---
-    PREDICTION_HORIZON_MINUTES = 30 # Change this to your desired prediction interval (e.g., 5, 30, 60, 120)
+    PREDICTION_HORIZON_MINUTES = 120 # Change this to your desired prediction interval (e.g., 5, 30, 60, 120)
     TIME_INTERVAL_MINUTES = 5 # Time between data points (as per your data)
     PREDICTION_STEPS_AHEAD = PREDICTION_HORIZON_MINUTES // TIME_INTERVAL_MINUTES
 
@@ -293,7 +293,7 @@ if __name__ == "__main__":
     training_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-training.xml')
     testing_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-testing.xml')
 
-    output_folder_name = f'patient-{patientNum}-mamba-{PREDICTION_HORIZON_MINUTES}min-pred' # Folder reflects prediction interval
+    output_folder_name = f'./{PREDICTION_HORIZON_MINUTES}_Min_Predictions/patient-{patientNum}' # Folder reflects prediction interval
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_folder_path = os.path.join(script_dir, output_folder_name)
 
@@ -348,4 +348,3 @@ if __name__ == "__main__":
             print(f"Error loading model or making prediction: {e}")
     else:
         print("\nModel training or data parsing failed. Skipping model loading demonstration.")
-        
