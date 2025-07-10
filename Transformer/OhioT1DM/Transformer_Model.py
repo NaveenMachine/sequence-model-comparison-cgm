@@ -304,7 +304,7 @@ if __name__ == "__main__":
     training_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-training.xml')
     testing_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-testing.xml')
 
-    output_folder_name = f'patient-{patientNum}-transformer-{PREDICTION_HORIZON_MINUTES}min-pred' # Folder reflects prediction interval
+    output_folder_name = f'./{PREDICTION_HORIZON_MINUTES}_Min_Predictions/patient-{patientNum}-transformer' # Folder reflects prediction interval
     script_dir = os.path.dirname(os.path.abspath(__file__))
     output_folder_path = os.path.join(script_dir, output_folder_name)
 
@@ -362,4 +362,3 @@ if __name__ == "__main__":
             print(f"Error loading model or making prediction: {e}")
     else:
         print("\nModel training or data parsing failed. Skipping model loading demonstration.")
-        
