@@ -292,13 +292,13 @@ if __name__ == "__main__":
     BATCH_SIZE = 32
 
     # --- Prediction Horizon Configuration ---
-    PREDICTION_HORIZON_MINUTES = 30 # Change this to your desired prediction interval (e.g., 5, 30, 60, 120)
+    PREDICTION_HORIZON_MINUTES = 120 # Change this to your desired prediction interval (e.g., 5, 30, 60, 120)
     TIME_INTERVAL_MINUTES = 5 # Time between data points (as per your data)
     PREDICTION_STEPS_AHEAD = PREDICTION_HORIZON_MINUTES // TIME_INTERVAL_MINUTES
 
     print(f"Model configured to predict {PREDICTION_HORIZON_MINUTES} minutes ({PREDICTION_STEPS_AHEAD} steps) into the future.")
 
-    patientNum = 559 # Example patient number
+    patientNum = 563 # Example patient number
 
     base_data_path = os.path.join('..', '..', 'CleanData', 'OhioT1DM')
     training_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-training.xml')
