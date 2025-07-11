@@ -298,7 +298,7 @@ if __name__ == "__main__":
 
     print(f"Model configured to predict {PREDICTION_HORIZON_MINUTES} minutes ({PREDICTION_STEPS_AHEAD} steps) into the future.")
 
-    patientNum = 570 # Example patient number
+    patientNum = 575 # Example patient number
 
     base_data_path = os.path.join('..', '..', 'CleanData', 'OhioT1DM')
     training_xml_path = os.path.join(base_data_path, f'{patientNum}-ws-training.xml')
